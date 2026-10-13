@@ -3,7 +3,7 @@
   ============================================================================
    M-TIC職員ポータル
    ファイル名 : index.html
-   バージョン : v2.1（2026-10-12）
+   バージョン : v2.3（2026-10-13）
    置き場所   : GitHub Pages（公式HPとは別のリポジトリ mtic-portal を想定）
    しくみ     : 画面＝このHTML1枚（全部のアプリ入り） ／ サインインと保存＝Firebase（無料プラン）
                 ／ メール通知・チャットのファイル保存・ショップの注文の受付＝裏方GAS（画面なし）
@@ -26,6 +26,11 @@
     管理         : 会員管理（責任者）／IDカード／設定・診断／リンク設定
   ----------------------------------------------------------------------------
    変更履歴
+    v2.3 (2026-10-13) 入退室のGoogleフォーム連携をつくりなおし：ポータルからつなぐ・過去の回答の取り込み・
+                    名簿と合わない名前の対応・戸締り確認・シートとのそろえ直し（裏方GAS v2.2 が必要）／
+                    在庫管理「カメラで読んで追加」（JANを読む → 登録ずみなら入庫・まだなら登録）
+    v2.2 (2026-10-12) サインインの守りを強く：2段階認証（認証アプリの6けたのコード・職員以上は必須）・
+                    タブを閉じたらサインアウト（端末に残さない。キオスクの端末だけ残す）・お店のページはサインインを写して開く
     v2.1 (2026-10-12) オンラインショップ（準備中）を付属：注文の対応・お客さまへのメール・在庫から出庫・
                     案件にする・載せる商品・お店の設定と表記（shop/index.html とつながる）
     v2.0 (2026-10-12) 全アプリを内蔵（タスカー・入退室・機材利用＋IDカード・点検メンテ・工程票・
@@ -139,6 +144,7 @@ textarea{height:auto;min-height:80px;padding:10px 12px;resize:vertical}
 input[readonly]{background:var(--bg-soft)}
 input:invalid{box-shadow:none}
 .inp-unit{display:flex;align-items:center;gap:6px}
+.inp-scan{display:flex;align-items:center;gap:6px}.inp-scan>input,.inp-scan>div{flex:1;min-width:0}.inp-scan>.btn{flex:none}
 .inp-unit>span{color:var(--muted);font-size:13px;white-space:nowrap}
 .pw-wrap{position:relative;display:block}
 .pw-wrap input{padding-right:46px}
@@ -654,8 +660,8 @@ if (window.top !== window.self) { document.body.innerHTML = '<p style="padding:2
    設定（ふだんは config.js に書く。ここは初期値）
    ========================================================================== */
 const CONFIG = {
-  VERSION: '2.1',
-  BUILD_DATE: '2026-10-12',
+  VERSION: '2.3',
+  BUILD_DATE: '2026-10-13',
   ORG_SHORT: 'M-TIC',
   ORG_FULL: 'NPO法人松戸技術革新センター M-TIC',
   LOGO_URL: '',
@@ -808,6 +814,7 @@ function toDate(v) {
   if (typeof v.toDate === 'function') return v.toDate();
   if (typeof v === 'number') return new Date(v);
   if (typeof v === 'string') {
+    if (/T\d{2}:\d{2}.*([zZ]|[+-]\d{2}:?\d{2})$/.test(v)) { const z = new Date(v); if (!isNaN(z)) return z; }   // 時差つき（裏方GASの時刻など）
     const m = v.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/);
     if (m) return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0));
     const d = new Date(v); return isNaN(d) ? null : d;
@@ -1529,6 +1536,16 @@ function errText(e) {
     'auth/invalid-action-code': 'このリンクは使えません（使用済みか期限切れ）。もう一度メールを送ってください',
     'auth/requires-recent-login': '安全のため、もう一度サインインしてからやり直してください',
     'auth/email-already-in-use': 'そのメールアドレスはすでに登録されています',
+    'auth/invalid-verification-code': '6けたのコードが違います（アプリの最新のコードを入れてください。スマホの時刻が大きくずれていると合いません）',
+    'auth/totp-challenge-timeout': '時間がたちすぎました。もう一度サインインしてください',
+    'auth/missing-multi-factor-session': '時間がたちすぎました。もう一度サインインしてください',
+    'auth/invalid-multi-factor-session': '時間がたちすぎました。もう一度サインインしてください',
+    'auth/multi-factor-auth-required': '2段階認証のコードが必要です',
+    'auth/multi-factor-info-not-found': 'その2段階認証の登録は見つかりませんでした',
+    'auth/unverified-email': '先にメールアドレスの確認が必要です',
+    'auth/maximum-second-factor-count-exceeded': '登録できる数の上限です。使っていない登録を消してください',
+    'auth/second-factor-already-in-use': 'その認証アプリはもう登録されています',
+    'auth/operation-not-allowed': 'この方法は、まだ有効になっていません（責任者が設定します）',
     'permission-denied': '権限がありません（役割が足りないか、ルールが古い可能性があります）',
     'unavailable': '通信できませんでした。少し待ってからもう一度試してください',
     'failed-precondition': 'データベースの準備（インデックス）が必要です。管理者に連絡してください',
@@ -1727,7 +1744,8 @@ function kvEl(pairs) { return h('dl.kv', pairs.filter((p) => p && p[1] !== undef
 /* ---- 05_form.js ---- */
 /* ==========================================================================
    入力フォームを「項目の一覧」から作る
-   fields: [{ k, label, type, req, opts, w(1-6), ph, help, min, max, step, unit, show(v), def, ro, rows, max }]
+   fields: [{ k, label, type, req, opts, w(1-6), ph, help, min, max, step, unit, show(v), def, ro, rows, max, inputmode,
+              scan: { title, hint, formats, value(text, parsed) → 入れる値（空なら読みなおし）, bad, after(v) } … 文字の欄の横にカメラのボタン }]
    type: text email tel url number yen date time datetime month textarea select radio check checks member members static custom
    ========================================================================== */
 function Form(fields, values = {}, o = {}) {
@@ -1813,10 +1831,28 @@ function Form(fields, values = {}, o = {}) {
         break;
       }
       default: {
-        ctl = h('input', { ...common, type: f.type === 'email' || f.type === 'tel' || f.type === 'url' ? f.type : 'text', maxlength: f.max || 200, inputmode: f.type === 'tel' ? 'tel' : null, autocomplete: f.ac || 'off', list: f.list ? id + '_dl' : null });
-        if (f.list) { const dl = h('datalist', { id: id + '_dl' }, (typeof f.list === 'function' ? f.list() : f.list).map((x) => h('option', { value: x }))); ctl = h('div', ctl, dl); ctl._focus = $('input', ctl); get = () => ctl._focus.value.trim(); set = (v) => { ctl._focus.value = v ?? ''; }; }
-        else { get = () => ctl.value.trim(); set = (v) => { ctl.value = v ?? ''; }; }
+        const inp = h('input', { ...common, type: f.type === 'email' || f.type === 'tel' || f.type === 'url' ? f.type : 'text', maxlength: f.max || 200, inputmode: f.inputmode || (f.type === 'tel' ? 'tel' : null), autocomplete: f.ac || 'off', list: f.list ? id + '_dl' : null });
+        ctl = inp;
+        if (f.list) { const dl = h('datalist', { id: id + '_dl' }, (typeof f.list === 'function' ? f.list() : f.list).map((x) => h('option', { value: x }))); ctl = h('div', inp, dl); ctl._focus = inp; }
+        get = () => inp.value.trim(); set = (v) => { inp.value = v ?? ''; };
       }
+    }
+    if (f.scan && !f.ro && ctl.tagName !== 'TEXTAREA') {   // カメラで読んで入れる（バーコード・QR）
+      const inner = ctl._focus || ctl;
+      const cam = h('button.btn.icon', { type: 'button', 'aria-label': (f.label || '') + 'をカメラで読む', title: 'カメラで読む' }, icon('camera'));
+      cam.addEventListener('click', () => Scanner.open({
+        title: f.scan.title || 'カメラで読む', hint: f.scan.hint, formats: f.scan.formats || 'all', continuous: true, cooldown: 1200,
+        onCode: async (text, p) => {
+          const v = f.scan.value ? f.scan.value(String(text || '').trim(), p) : String(text || '').trim();
+          if (!v) { beep(false); toast(f.scan.bad || 'このコードは使えません。もう一度読んでください', 'err', 4000); return true; }
+          set(v); fire(); beep(true);
+          if (f.scan.after) setTimeout(() => f.scan.after(v), 0);
+          return false;
+        }
+      }));
+      const box = h('div.inp-scan', ctl, cam);
+      box._focus = inner;
+      ctl = box;
     }
     if (f.type !== 'check' && f.type !== 'radio' && f.type !== 'checks' && f.type !== 'members' && f.type !== 'custom') {
       (ctl._focus || ctl).addEventListener?.('input', fire);
@@ -2327,7 +2363,12 @@ const state = {
   mode: 'init', user: null, member: null, appLinks: {}, unsub: [],
   shared: store.sget('mtic-shared') === '1', reloading: false, demoRole: store.sget('mtic-demo-role') || 'owner'
 };
-const LOADED_SHARED = state.shared;          // 読み込んだ時点で共用端末モードだったか（キャッシュの種類が決まる）
+// サインインの保存：ふだんは「このタブだけ」（タブ・ブラウザを閉じたらサインアウト。端末にサインインもデータの写しも残さない）
+// キオスク専用の端末（キオスク用アカウントでサインインした端末）だけは、再起動しても使えるように端末に残す
+// （その端末で職員がサインインしたタブは mtic-nokeep をつけて読み込みなおし、職員のデータは端末に残さない）
+const KIOSK_DEVICE = store.get('mtic-kiosk-device') === '1';
+const KIOSK_KEEP = KIOSK_DEVICE && store.sget('mtic-nokeep') !== '1';
+const MFA_ROLES = ['owner', 'admin', 'staff'];   // 2段階認証（認証アプリ）を必須にする役割
 const markJust = (kind) => store.sset('mtic-just', kind);
 let fb = null;      // { app, auth, db, A, F, appM }
 const me = () => state.member || {};
@@ -2346,22 +2387,30 @@ async function loadFirebase() {
     import(FIREBASE_SDK + 'firebase-firestore.js')
   ]);
   const app = appM.initializeApp(CONFIG.FIREBASE);
-  const auth = A.initializeAuth(app, { persistence: state.shared ? [A.browserSessionPersistence] : [A.indexedDBLocalPersistence, A.browserLocalPersistence] });
+  const keep = KIOSK_KEEP;
+  if (!KIOSK_DEVICE) await forgetLocalTraces();     // キオスクの端末では、キオスクのサインインを消さない
+  const auth = A.initializeAuth(app, { persistence: keep ? [A.indexedDBLocalPersistence, A.browserLocalPersistence] : [A.browserSessionPersistence] });
   auth.languageCode = 'ja';
   const db = F.initializeFirestore(app, {
     ignoreUndefinedProperties: true,
-    localCache: state.shared ? F.memoryLocalCache() : F.persistentLocalCache({ tabManager: F.persistentMultipleTabManager() })
+    localCache: keep ? F.persistentLocalCache({ tabManager: F.persistentMultipleTabManager() }) : F.memoryLocalCache()
   });
   fb = { app, auth, db, A, F, appM };
+}
+/** v2.1 までに端末へ残ったサインイン情報・データの写しを消す（同じアドレスの別のページから読まれないように） */
+async function forgetLocalTraces() {
+  try { Object.keys(localStorage).filter((k) => k.startsWith('firebase:authUser:')).forEach((k) => localStorage.removeItem(k)); } catch { /* なし */ }
+  const del = (name) => new Promise((res) => { try { const r = indexedDB.deleteDatabase(name); r.onsuccess = r.onerror = r.onblocked = () => res(); setTimeout(res, 1500); } catch { res(); } });
+  await Promise.all(['firebaseLocalStorageDb', `firestore/[DEFAULT]/${CONFIG.FIREBASE.projectId}/main`].map(del));
 }
 const actionSettings = () => ({ url: location.origin + location.pathname, handleCodeInApp: false });
 
 /** サインインまわりの窓口（本番とデモで中身が違う） */
 const Auth = {
-  async signIn(email, pw, shared) {
+  async signIn(email, pw) {
     if (state.mode === 'demo') return null;
     const { A } = fb;
-    await A.setPersistence(fb.auth, shared ? A.browserSessionPersistence : A.browserLocalPersistence);
+    await A.setPersistence(fb.auth, A.browserSessionPersistence);
     return (await A.signInWithEmailAndPassword(fb.auth, email, pw)).user;
   },
   async signOut() { if (state.mode === 'live') await fb.A.signOut(fb.auth); },
@@ -2369,12 +2418,13 @@ const Auth = {
   async changePassword(current, next) {
     if (state.mode === 'demo') { await sleep(300); toast('デモなので変更はされません'); return; }
     const { A } = fb, u = fb.auth.currentUser;
-    await A.reauthenticateWithCredential(u, A.EmailAuthProvider.credential(u.email, current));
+    try { await A.reauthenticateWithCredential(u, A.EmailAuthProvider.credential(u.email, current)); }
+    catch (e) { if (!e || e.code !== 'auth/multi-factor-auth-required') throw e; await Mfa.resolve(e); }   // 2段階認証のコードも確かめる
     await A.updatePassword(u, next);
     Notify.send('passwordChanged');
   },
   async sendVerify() { if (state.mode === 'demo') { toast('デモなのでメールは送りません'); return; } await fb.A.sendEmailVerification(fb.auth.currentUser, actionSettings()); },
-  async idToken() { return state.mode === 'live' && fb.auth.currentUser ? fb.auth.currentUser.getIdToken() : ''; },
+  async idToken(force) { return state.mode === 'live' && fb.auth.currentUser ? fb.auth.currentUser.getIdToken(!!force) : ''; },
   emailVerified() { return state.mode !== 'live' || !fb.auth.currentUser || fb.auth.currentUser.emailVerified; },
   async afterSignIn(kind) {
     if (state.mode !== 'live') return;
@@ -2423,8 +2473,9 @@ function screenSignin() {
   const form = h('form', { novalidate: true, autocomplete: 'on' },
     h('label.field', h('span', 'メールアドレス'), email),
     h('label.field', h('span', 'パスワード（このサイト専用）'), h('span.pw-wrap', pw, eye)),
-    h('label.check', shared, h('span', '共用の端末で使う（ブラウザを閉じたらサインアウト・', String(CONFIG.SHARED_IDLE_MINUTES), '分操作がなければ自動でサインアウト）')),
-    msg, go);
+    h('label.check', shared, h('span', '共用の端末で使う（', String(CONFIG.SHARED_IDLE_MINUTES), '分操作がなければ自動でサインアウト）')),
+    msg, go,
+    h('p.small.muted', { style: { margin: '10px 0 0' } }, '安全のため、タブやブラウザを閉じると自動でサインアウトします。サインインには、パスワードとスマホの認証アプリの6けたのコードを使います。'));
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!email.value.trim() || !pw.value) return msgBox(msg, 'メールアドレスとパスワードを入れてください');
@@ -2433,12 +2484,11 @@ function screenSignin() {
     try {
       state.shared = sh; store.sset('mtic-shared', sh ? '1' : null);
       markJust('login');
-      if (sh && !LOADED_SHARED) state.reloading = true;
-      await Auth.signIn(email.value.trim(), pw.value, sh);
+      await Auth.signIn(email.value.trim(), pw.value);
       pw.value = '';
-      if (state.reloading) { location.reload(); return; }
     } catch (err) {
-      markJust(null); state.reloading = false; store.sset('mtic-shared', LOADED_SHARED ? '1' : null); state.shared = LOADED_SHARED;
+      if (err && err.code === 'auth/multi-factor-auth-required') { pw.value = ''; screenMfa(err); return; }
+      markJust(null);
       msgBox(msg, errText(err));
     } finally { go.disabled = false; }
   });
@@ -2456,6 +2506,140 @@ function screenSignin() {
     forgot));
   // 自動でメール欄にカーソルを置く（もう別の欄に入力し始めていたら動かさない）
   setTimeout(() => { const a = document.activeElement; if (!a || a === document.body) email.focus(); }, 50);
+}
+
+/* ==========================================================================
+   2段階認証（スマホの認証アプリの6けたのコード＝TOTP）
+   ・職員・管理者・責任者は必須（はじめてサインインしたときに登録）。キオスク・裏方の自動処理は使わない
+   ・スマホのデータは送らない（最初にQRで「合言葉」を共有するだけ。コードはアプリの中で作られる）
+   ========================================================================== */
+const Mfa = {
+  factors() { const u = fb && fb.auth.currentUser; return u ? fb.A.multiFactor(u).enrolledFactors || [] : []; },
+  hasTotp() { return this.factors().some((f) => f.factorId === fb.A.TotpMultiFactorGenerator.FACTOR_ID); },
+  needed(member) { return state.mode === 'live' && MFA_ROLES.includes(member && member.role); },
+  /** パスワードの確認のあとで6けたのコードを聞く（パスワード変更など、サインインの画面以外） */
+  async resolve(err) {
+    const { A } = fb;
+    const resolver = A.getMultiFactorResolver(fb.auth, err);
+    const hint = resolver.hints.find((x) => x.factorId === A.TotpMultiFactorGenerator.FACTOR_ID);
+    if (!hint) throw uerr('この2段階認証の方法には対応していません。責任者に連絡してください');
+    const code = await askText('2段階認証のコード', { message: 'スマホの認証アプリに出ている6けたのコードを入れてください。', ok: '確認', required: true, max: 8 });
+    if (!code) throw uerr('やめました');
+    return resolver.resolveSignIn(A.TotpMultiFactorGenerator.assertionForSignIn(hint.uid, code.replace(/\D/g, '')));
+  },
+  /** 登録の部品（QR・手入力用の文字・コードの欄）。登録できたら onDone */
+  async enrollEl(user, onDone) {
+    const { A } = fb;
+    const secret = await A.TotpMultiFactorGenerator.generateSecret(await A.multiFactor(user).getSession());
+    const url = secret.generateQrCodeUrl(user.email, 'M-TIC職員ポータル');
+    const qr = h('div', { style: { display: 'flex', justifyContent: 'center', margin: '8px 0' } }, loadingEl());
+    Codes.ready().then(() => { qr.innerHTML = Codes.qrSvg(url, { size: '46mm', margin: 2 }); }).catch(() => mount(qr, h('div.small.muted', 'QRを作れませんでした。下の「手で入れる」の文字を使ってください')));
+    const code = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: 8, placeholder: '123456', 'aria-label': '6けたのコード' });
+    const name = h('input', { type: 'text', maxlength: 30, value: 'スマホの認証アプリ', 'aria-label': '名前' });
+    const msg = h('div');
+    const go = h('button.btn.primary.block', { type: 'submit' }, '登録する');
+    const form = h('form', { novalidate: true }, h('label.field', h('span', 'アプリに出た6けたのコード'), code), h('label.field', h('span', 'この登録の名前（あとで見分けるため）'), name), msg, go);
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const v = code.value.replace(/\D/g, '');
+      if (v.length !== 6) return msgBox(msg, '6けたの数字を入れてください');
+      go.disabled = true;
+      try { await A.multiFactor(user).enroll(A.TotpMultiFactorGenerator.assertionForEnrollment(secret, v), name.value.trim() || 'スマホの認証アプリ'); await onDone(); }
+      catch (ex) { msgBox(msg, errText(ex)); go.disabled = false; }
+    });
+    softFocus(code, null, 120);
+    return h('div',
+      h('ol.small', { style: { paddingLeft: '18px', margin: '0 0 6px' } },
+        h('li', 'スマホに認証アプリを入れる（Google Authenticator・Microsoft Authenticator など。iPhone は標準の「パスワード」アプリでも使えます）'),
+        h('li', 'アプリで「QRコードをスキャン」して、下のQRを読む'),
+        h('li', 'アプリに出た6けたのコードを入れて「登録する」')),
+      qr,
+      h('details.small', { style: { margin: '4px 0 12px' } }, h('summary', 'QRが読めないとき（手で入れる文字）'), h('div.mono', { style: { wordBreak: 'break-all', margin: '6px 0' } }, secret.secretKey), h('div.muted', '種類：時間ベース（TOTP）・6けた・30秒')),
+      form,
+      h('p.small.muted', { style: { marginBottom: 0 } }, 'スマホの中のデータ（連絡先・写真など）がポータルに送られることはありません。この画面のQRは人に見せないでください。'));
+  }
+};
+/** サインイン：パスワードのあとに6けたのコード */
+function screenMfa(err) {
+  const { A } = fb;
+  let resolver, hint;
+  try { resolver = A.getMultiFactorResolver(fb.auth, err); hint = resolver.hints.find((x) => x.factorId === A.TotpMultiFactorGenerator.FACTOR_ID); } catch { /* なし */ }
+  if (!hint) { markJust(null); screenSignin(); toast('この2段階認証の方法には対応していません。責任者に連絡してください', 'err', 6000); return; }
+  const code = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: 8, placeholder: '123456', 'aria-label': '6けたのコード' });
+  const msg = h('div');
+  const go = h('button.btn.primary.block', { type: 'submit' }, '確認してサインイン');
+  const form = h('form', { novalidate: true }, h('label.field', h('span', '認証アプリの6けたのコード'), code), msg, go);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const v = code.value.replace(/\D/g, '');
+    if (v.length !== 6) return msgBox(msg, '6けたの数字を入れてください');
+    go.disabled = true;
+    try { await resolver.resolveSignIn(A.TotpMultiFactorGenerator.assertionForSignIn(hint.uid, v)); }
+    catch (ex) { msgBox(msg, errText(ex)); go.disabled = false; code.select(); }
+  });
+  mount($('#root'), authCard(
+    h('h1', '2段階認証'),
+    h('p.lead', `スマホの認証アプリに出ている「M-TIC職員ポータル」の6けたのコードを入れてください${hint.displayName ? `（${hint.displayName}）` : ''}。`),
+    form,
+    h('div', { style: { marginTop: '10px' } }, h('button.linkbtn', { type: 'button', onclick: () => { markJust(null); screenSignin(); } }, 'もどる')),
+    h('p.small.muted', 'スマホをなくした・機種を変えて使えないときは、責任者に連絡してください。')));
+  softFocus(code, null, 60);
+}
+/** はじめてのサインイン：2段階認証の登録（済むまでポータルは使えない）
+    onSkip：認証アプリの方式がまだ有効になっていないときに、責任者だけ「今回は続ける」を出す（設定が済むまでの間） */
+async function screenMfaEnroll(user, onSkip) {
+  const card = (...kids) => mount($('#root'), h('div.center', h('div.card.wide', h('div.row', logoEl(), h('span.badge', 'M-TIC職員専用')), ...kids)));
+  if (!user.emailVerified) {
+    const msg = h('div');
+    card(h('h1', '2段階認証の準備：メールアドレスの確認'),
+      h('p.lead', `安全のため、2段階認証を設定する前に、メールアドレス（${user.email}）の確認が必要です。`),
+      btn('確認メールを送る', (e, b) => act(b, () => Auth.sendVerify(), '確認メールを送りました。メールのリンクを開いてから、下のボタンを押してください'), 'primary block', 'send'),
+      h('div.mt8', btn('確認しました（続ける）', async (e, b) => { await act(b, () => user.reload()); const u = fb.auth.currentUser; if (u && u.emailVerified) screenMfaEnroll(u, onSkip); else msgBox(msg, 'まだ確認できていません。メールのリンクを開いてから、もう一度押してください'); }, 'block')),
+      msg, h('div.mt8', btn('サインアウト', () => doSignOut(), 'sm ghost')));
+    return;
+  }
+  let el;
+  try { el = await Mfa.enrollEl(user, async () => { await doSignOut(); toast('2段階認証を登録しました。次からはパスワードと6けたのコードでサインインします', 'ok', 7000); }); }
+  catch (e) {
+    if (e && e.code === 'auth/requires-recent-login') { await doSignOut('安全のため、もう一度サインインしてから登録してください'); return; }
+    const temp = !e || ['auth/network-request-failed', 'auth/too-many-requests', 'unavailable'].includes(e.code);   // 一時的なもの
+    const skip = !temp && onSkip && isOwner();
+    card(h('h1', '2段階認証'),
+      h('div.msg.err', temp ? errText(e) : '2段階認証の登録を始められませんでした。認証アプリ（TOTP）の方式が、まだ有効になっていない可能性があります' + (e && e.code === 'auth/operation-not-allowed' ? '。' : `（${(e && e.code) || errText(e)}）`)),
+      temp ? h('div.mt8', btn('もう一度', () => screenMfaEnroll(fb.auth.currentUser || user, onSkip), 'primary block', 'refresh')) : null,
+      skip ? h('div.tip', '責任者の方へ：Firebase で認証アプリ（TOTP）の方式を有効にすると登録できます（セットアップ手順シートの「2段階認証」）。有効にするまでの間だけ、責任者は2段階認証なしで続けられます。') : null,
+      skip ? h('div.mt8', btn('今回は2段階認証なしで続ける', () => onSkip(), 'block')) : null,
+      !temp && !skip ? h('p.small.muted', '責任者に連絡してください。') : null,
+      h('div.mt8', btn('サインアウト', () => doSignOut(), 'block ghost')));
+    return;
+  }
+  card(h('h1', '2段階認証を登録する（はじめての1回だけ）'),
+    h('p.lead', '職員ポータルは「パスワード＋スマホの認証アプリの6けたのコード」でサインインします。パスワードが漏れても、スマホがなければ入れません。'),
+    el, h('div.mt8', btn('あとで（サインアウト）', () => doSignOut(), 'sm ghost')));
+}
+/** 右上のメニュー：2段階認証の確認・予備の登録・消す */
+function openMfa() {
+  if (state.mode !== 'live') { toast('デモでは使えません'); return; }
+  const d = openDialog({ title: '2段階認証（認証アプリ）', size: 'sm', body: loadingEl() });
+  const draw = () => {
+    const fs = Mfa.factors();
+    d.setBody(h('div',
+      h('p.small.muted.mt0', 'スマホを替えるときは、古いスマホがあるうちに新しいスマホを「予備を登録」してから、古い登録を消してください。'),
+      fs.length ? h('ul', { style: { paddingLeft: '18px' } }, fs.map((f) => h('li', h('b', f.displayName || '認証アプリ'), h('span.small.muted', `　登録：${fmtDate(f.enrollmentTime) || ''}`), ' ',
+        btn('消す', async (e, b) => {
+          if (fs.length === 1 && !await ask('最後の1つを消すと、次のサインインで登録しなおしになります。消しますか？', { danger: true, ok: '消す' })) return;
+          await act(b, async () => { try { await fb.A.multiFactor(fb.auth.currentUser).unenroll(f); } catch (ex) { if (ex && ex.code === 'auth/requires-recent-login') throw uerr('安全のため、サインインしなおしてから消してください'); throw ex; } draw(); }, '消しました');
+        }, 'xs ghost', 'trash')))) : h('p', 'まだ登録されていません'),
+      btn('予備を登録（別のスマホ・アプリ）', async (e, b) => {
+        await act(b, async () => {
+          let el;
+          try { el = await Mfa.enrollEl(fb.auth.currentUser, async () => { toast('登録しました', 'ok'); draw(); }); }
+          catch (ex) { if (ex && ex.code === 'auth/requires-recent-login') throw uerr('安全のため、サインインしなおしてから登録してください'); throw ex; }
+          d.setBody(el);
+        });
+      }, 'primary', 'plus')));
+  };
+  draw();
 }
 
 function screenPending(text) {
@@ -2490,8 +2674,9 @@ async function handleActionLink() {
         clean();
         markJust('login');
         state.settingPw = false;
-        await A.signInWithEmailAndPassword(fb.auth, email, w.value());
         toast('パスワードを設定しました' + (r.warn ? '（' + r.warn + '）' : ''), 'ok');
+        try { await A.signInWithEmailAndPassword(fb.auth, email, w.value()); }
+        catch (e2) { if (e2 && e2.code === 'auth/multi-factor-auth-required') { screenMfa(e2); return; } throw e2; }
       } catch (err) { msgBox(msg, errText(err)); go.disabled = false; }
     });
     state.settingPw = true;
@@ -2509,6 +2694,7 @@ async function handleActionLink() {
 }
 
 async function doSignOut(reason) {
+  const wasKiosk = state.mode === 'live' && isKiosk();
   closeAllDialogs();
   Router.leave();
   state.unsub.forEach((u) => { try { u(); } catch { /* なし */ } }); state.unsub = [];
@@ -2516,9 +2702,11 @@ async function doSignOut(reason) {
   if (state.mode === 'demo') { state.member = null; store.sset('mtic-demo', null); location.hash = ''; location.reload(); return; }
   try {
     await Auth.signOut();
-    if (state.shared) {          // 共用端末：この端末に残ったデータも消す
-      store.sset('mtic-shared', null);
-      try { await fb.F.terminate(fb.db); await fb.F.clearIndexedDbPersistence(fb.db); } catch { /* メモリのみの時は何もしない */ }
+    if (state.shared) { store.sset('mtic-shared', null); state.shared = false; }
+    if (wasKiosk) {              // キオスクをやめる：端末に残したデータの写しも消して、ふつうの端末にもどす
+      store.set('mtic-kiosk-device', null); store.sset('mtic-nokeep', null);
+      try { await fb.F.terminate(fb.db); await fb.F.clearIndexedDbPersistence(fb.db); } catch { /* なし */ }
+      state.reloading = true;
       location.reload();
       return;
     }
@@ -2545,7 +2733,7 @@ const Notify = {
   async call(action, payload = {}, o = {}) {
     if (state.mode === 'demo') throw uerr('デモ表示では使えません');
     if (!CONFIG.NOTIFY_URL) throw uerr('裏方GAS（NOTIFY_URL）がまだ設定されていません。管理者に連絡してください');
-    const idToken = await Auth.idToken();
+    const idToken = await Auth.idToken(!!o.fresh);
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), o.timeout || 30000);
     try {
@@ -2572,8 +2760,15 @@ const Notify = {
 const GAS_ERRORS = {
   unauthorized: 'サインインの確認ができませんでした。もう一度サインインしてください', not_member: '会員として確認できませんでした',
   forbidden: '権限がありません', quota: '今日のメール送信の上限に達しました（明日またお試しください）', too_large: 'ファイルが大きすぎます',
-  not_found: '見つかりませんでした', bad_request: '送った内容が正しくありません', no_folder: '保存先のフォルダを作れませんでした', unknown_action: '裏方GASが古い版です（v2.1に更新してください）',
-  too_soon: '続けては送れません。少し待ってからもう一度試してください', no_bridge: '裏方GASの自動処理用アカウント（BRIDGE）がまだ設定されていません'
+  not_found: '見つかりませんでした', bad_request: '送った内容が正しくありません', no_folder: '保存先のフォルダを作れませんでした', unknown_action: '裏方GASが古い版です（最新の v2.2 に更新してください）',
+  too_soon: '続けては送れません。少し待ってからもう一度試してください', no_bridge: '裏方GASの自動処理用アカウント（BRIDGE）がまだ設定されていません',
+  need_auth: '裏方GASに、フォーム（またはシート）を読む許可がまだありません。団体のアカウントでGASのエディタを開き、checkSetup を1回実行して「許可」してください',
+  need_edit_url: '回答用のURL（forms.gle など）では、フォームがわかりません。フォームの編集画面のURL（…/forms/d/〇〇/edit）を貼ってください',
+  form_not_found: 'フォームが見つかりませんでした（団体のアカウント matsudorobots@gmail.com で開けるフォームか、URLを確認してください）',
+  many_forms: 'このスプレッドシートには、いくつかのフォームの回答が入っています。フォームの編集画面のURLを貼ってください',
+  no_form_in_sheet: 'このスプレッドシートには、フォームの回答がつながっていません', no_form: 'つながっているフォームがありません',
+  sheet_missing: '回答のシートが見つかりません（消された・つなぎ先が変わった可能性）。つなぎなおしてください',
+  busy: 'いま、ほかの取り込みが動いています。1〜2分待ってから、もう一度押してください', read_failed: 'ポータルのデータを読めませんでした。少し待ってからもう一度試してください'
 };
 
 /* ==========================================================================
@@ -2713,6 +2908,7 @@ function openUserMenu(anchor) {
     { label: '通知・表示の設定', icon: 'bell', onClick: openPrefs },
     m.role !== 'kiosk' ? { label: '自分のIDカード（QR）', icon: 'idcard', onClick: () => openMyCard() } : null,
     { label: 'パスワードを変更', icon: 'key', onClick: openPassword },
+    state.mode === 'live' && m.role !== 'kiosk' ? { label: '2段階認証（認証アプリ）', icon: 'shield', onClick: openMfa } : null,
     { label: 'ログイン履歴', icon: 'history', onClick: openHistory },
     state.mode === 'demo' ? '-' : null,
     state.mode === 'demo' ? { label: 'デモ：役割を切り替え（見え方の確認）', icon: 'users', onClick: demoRoleSwitch } : null,
@@ -3284,9 +3480,10 @@ const Entry = {
 defineApp('entry', {
   render(ctx) {
     const tab = ctx.parts[0] || 'board';
-    const body = ctx.head({ tabs: [{ id: 'board', label: '在室ボード', icon: 'door' }, { id: 'log', label: '記録', icon: 'history' }, { id: 'stats', label: '月の集計', icon: 'pie' }], tab });
+    const body = ctx.head({ tabs: [{ id: 'board', label: '在室ボード', icon: 'door' }, { id: 'log', label: '記録', icon: 'history' }, { id: 'stats', label: '月の集計', icon: 'pie' }, isAdmin() ? { id: 'form', label: 'Googleフォーム', icon: 'link' } : null], tab });
     if (tab === 'board') entryBoard(ctx, body);
     else if (tab === 'log') entryLog(ctx, body);
+    else if (tab === 'form' && isAdmin()) entryFormTab(ctx, body);
     else entryStats(ctx, body);
   }
 });
@@ -3334,22 +3531,34 @@ function entryLog(ctx, body) {
   const monthInp = h('input', { type: 'month', value: month, style: { width: 'auto' } });
   const box = h('div.panel.pad0');
   let rows = [];
-  mount(body, h('div.toolbar', monthInp, h('span.sp'), btn('CSVで保存', () => download(`入退室記録_${month}.csv`, toCsv([['日付', '時刻', '名前', '入退室', '方法', '滞在（分）', 'メモ'], ...rows.map((r) => [r.date, hm(r.at), r.name, r.type === 'in' ? '入室' : '退室', VIA[r.via] || r.via, r.stayMin ?? '', r.note || ''])]), 'text/csv'), 'sm', 'download')), box);
+  mount(body, h('div.toolbar', monthInp, h('span.sp'), btn('CSVで保存', () => download(`入退室記録_${month}.csv`, toCsv([['日付', '時刻', '名前', '入退室', '方法', '滞在（分）', 'メモ'], ...rows.map((r) => [r.date, hm(r.at), r.name, entryType(r.type)[0], VIA[r.via] || r.via, r.stayMin ?? '', entryNote(r)])]), 'text/csv'), 'sm', 'download')), box);
   let unsub = null;
   const load = () => { if (unsub) unsub(); unsub = DB.watch('entries', { where: [['ym', '==', month]] }, (r) => { rows = sortBy(r, '-at'); draw(); }); };
   ctx.track(() => unsub && unsub());
   monthInp.addEventListener('change', () => { month = monthInp.value || ym(); load(); });
   const draw = () => mount(box, dataTable({ rows, empty: 'この月の記録はありません', cols: [
     { k: 'date', label: '日付', render: (r) => fmtDay(r.date) }, { k: 't', label: '時刻', render: (r) => hm(r.at) },
-    { k: 'name', label: '名前', sort: true }, { k: 'type', label: '', render: (r) => stChip(r.type === 'in' ? '入室' : '退室', r.type === 'in' ? 'c-green' : 'c-gray') },
+    { k: 'name', label: '名前', sort: true }, { k: 'type', label: '', render: (r) => stChip(...entryType(r.type)) },
     { k: 'via', label: '方法', render: (r) => h('span.small.muted', VIA[r.via] || r.via || '') },
     { k: 'stayMin', label: '滞在', cls: 'r', render: (r) => (r.stayMin ? fmtMin(r.stayMin) : '') },
-    { k: 'note', label: 'メモ', render: (r) => h('span.xs.muted', r.note || '') },
-    isAdmin() ? { k: 'x', label: '', render: (r) => btn('', async () => { if (await ask('この記録を消しますか？', { danger: true, ok: '消す' })) act(null, () => DB.del('entries/' + r.id), '消しました'); }, 'xs icon ghost', 'trash', { 'aria-label': '消す' }) } : null
+    { k: 'note', label: 'メモ', render: (r) => h('span.xs.muted', entryNote(r)) },
+    isAdmin() ? { k: 'x', label: '', render: (r) => btn('', () => entryDelete(r), 'xs icon ghost', 'trash', { 'aria-label': '消す' }) } : null
   ].filter(Boolean) }));
   load();
 }
 const VIA = { self: '本人', kiosk: 'キオスク', admin: '管理者', form: 'Googleフォーム', auto: '自動' };
+/** 記録を消す（Googleフォームから入った記録は、次にそろえたときに入れなおさないよう印をつける） */
+async function entryDelete(r) {
+  const fromForm = r.via === 'form' && String(r.id).startsWith('form_');
+  if (!await ask(fromForm ? 'Googleフォームから入った記録です。ポータルから消しますか？\n（次からは取り込みません。フォームの回答・シートの行はそのままです）' : 'この記録を消しますか？', { danger: true, ok: '消す' })) return;
+  await act(null, async () => {
+    if (fromForm) { const cfg = (await DB.get('config/entryForm')) || {}; await DB.set('config/entryForm', { ...cfg, skip: uniq([...(cfg.skip || []), r.id]).slice(-500), updatedAt: DB.now() }); }
+    await DB.del('entries/' + r.id);
+  }, '消しました');
+}
+const ENTRY_TYPES = { in: ['入室', 'c-green'], out: ['退室', 'c-gray'], lock: ['戸締り', 'c-blue'] };
+const entryType = (t) => ENTRY_TYPES[t] || ENTRY_TYPES.out;
+const entryNote = (r) => [r.note || '', r.formName ? `フォームでは「${r.formName}」` : ''].filter(Boolean).join('／');
 
 function entryStats(ctx, body) {
   let month = ym();
@@ -3376,6 +3585,126 @@ function entryStats(ctx, body) {
     })) : emptyEl('記録はありません'));
   }
   load();
+}
+
+/* ==========================================================================
+   Googleフォームとつなぐ（責任者・管理者）… 裏方GAS v2.2 が、今までの入退室フォームの回答（過去の分も）を記録に入れる
+   ・名簿と合わない名前は、ここで会員を選ぶ（config/entryForm の aliases。キーは裏方GASがそろえた名前）
+   ========================================================================== */
+function entryFormTab(ctx, body) {
+  const box = h('div');
+  mount(body, box);
+  if (state.mode !== 'live') {
+    mount(box, h('div.panel', h('h3', 'Googleフォームとつなぐ'), h('p.small.muted', 'デモ表示では使えません。本番では、今までの入退室のGoogleフォームの回答（過去の分も）を、ここの「記録」と「在室ボード」に入れられます。')));
+    return;
+  }
+  let st = null, cfg = {}, cands = null, busyMsg = '';
+  const call = (op, extra = {}, long = false) => Notify.call('entryForm', { op, ...extra }, { timeout: long ? 330000 : 60000, fresh: long });
+  const syncText = (s) => s ? `回答 ${s.rows} 行 → 記録 ${s.events} 件（新しく ${s.created} 件${s.updated ? `・直した ${s.updated} 件` : ''}）${s.unmatched ? `・名簿と合わない名前 ${s.unmatched} 人` : ''}` : '';
+  const run = async (b, fn, label) => {
+    busyMsg = label; draw();
+    try { await busy(b, fn); } catch (e) { toast(errText(e), 'err', 8000); } finally { busyMsg = ''; draw(); }
+  };
+  const doSync = (b, prune) => run(b, async () => {
+    st = await call('sync', prune ? { prune: true, expect: prune } : {}, true);
+    if (prune && st.sync.refused) toast(`件数が変わったか、多すぎるため消しませんでした（いまは ${st.sync.stale} 件）。内容を確かめてください`, 'err', 9000);
+    else toast(prune ? `ポータルにだけ残っていた ${st.sync.pruned} 件を消しました` : 'そろえました：' + syncText(st.sync), 'ok', 7000);
+  }, '取り込んでいます（回答が多いと数分かかります）…');
+  const doConnect = (b, ref) => run(b, async () => { st = await call('connect', { ref }, true); cands = null; toast(`「${st.connected.title}」とつなぎました：` + syncText(st.sync), 'ok', 8000); }, 'つないで、今までの回答を取り込んでいます…');
+  const saveCfg = async (patch) => { await DB.set('config/entryForm', { aliases: cfg.aliases || {}, ignore: cfg.ignore || [], labels: cfg.labels || {}, columns: cfg.columns || {}, skip: cfg.skip || [], ...patch, updatedAt: DB.now() }, { wait: true }); };
+
+  function draw() {
+    if (!st) return;
+    const s = st.status || {};
+    const forms = st.forms || [];
+    const members = Dir.all().filter((m) => ['owner', 'admin', 'staff'].includes(m.role));
+    const memberName = (uid) => (members.find((m) => m.id === uid) || {}).name || '（いない会員）';
+    const parts = [];
+    // つながっているフォーム
+    const formCards = forms.map((f) => {
+      const info = (s.forms || {})[f.formId] || {};
+      const c = info.cols || {};
+      const heads = c.heads || [];
+      const over = (cfg.columns || {})[f.formId] || {};
+      const selName = h('select', h('option', { value: '' }, '（自動）'), heads.map((x) => h('option', { value: x, selected: over.name === x }, x)));
+      const selType = h('select', h('option', { value: '' }, '（自動）'), heads.map((x) => h('option', { value: x, selected: over.type === x }, x)));
+      return h('div.panel',
+        h('div.row', h('b.grow', f.title), stChip('つながっている', 'c-green')),
+        h('div.small.muted', f.source === 'sheet' ? `回答のシート「${f.tabName || ''}」から読みます（シートで直した行も入ります）` : 'フォームの回答から読みます', '　', h('a', { href: f.url, target: '_blank', rel: 'noopener' }, 'フォームを開く')),
+        h('div.small.mt8', `読んでいる質問：名前「${c.name || 'わからない'}」・入退室「${c.type || 'わからない（答えから探す）'}」` + (c.lock && c.lock.length ? `・戸締り「${c.lock.join('」「')}」` : '') + (c.time ? `・時刻「${c.time}」` : '')),
+        heads.length ? h('details.small.mt8', h('summary', '質問を選びなおす（うまく読めていないとき）'),
+          h('div.row.mt8', h('label.field', h('span', '名前の質問'), selName), h('label.field', h('span', '入室・退室の質問'), selType)),
+          btn('この質問で読みなおす', (e, b) => run(b, async () => { await saveCfg({ columns: { ...(cfg.columns || {}), [f.formId]: { name: selName.value, type: selType.value } } }); st = await call('sync', {}, true); toast('読みなおしました：' + syncText(st.sync), 'ok', 7000); }, '読みなおしています…'), 'sm', 'refresh')) : null,
+        h('div.row.mt8', h('span.sp'), btn('つなぐのをやめる', async (e, b) => {
+          if (!await ask(`「${f.title}」とつなぐのをやめますか？（入れた記録は残ります。フォームとシートもそのまま）`, { ok: 'やめる' })) return;
+          run(b, async () => { st = await call('disconnect', { formId: f.formId }); toast('やめました'); }, '');
+        }, 'sm ghost', 'x')));
+    });
+    // つなぐ（探す・URL）
+    const ref = h('input', { type: 'url', placeholder: 'https://docs.google.com/forms/d/…/edit', 'aria-label': 'フォームの編集用のURL' });
+    const connectBox = h('div.panel',
+      h('h3', forms.length ? 'ほかのフォームもつなぐ' : '入退室のフォームとつなぐ'),
+      h('p.small.muted.mt0', '団体のアカウント（matsudorobots@gmail.com）のドライブにあるフォームから選びます。つなぐと、今までの回答をまとめて取り込み、新しい回答はすぐ（数秒〜1分）ここに入ります。フォームと回答のシートは、今まで通り使えます。'),
+      btn('フォームを探す', (e, b) => run(b, async () => { cands = (await call('find')).candidates || []; }, '探しています…'), 'primary', 'search'),
+      cands ? (cands.length ? h('div.col.mt8', cands.map((c) => h('div.row', h('span.grow', c.title, c.likely ? h('span.badge.green', { style: { marginLeft: '6px' } }, '入退室らしい') : null, h('span.xs.muted', '　更新 ' + fmtShort(c.updated))),
+        c.connected ? stChip('つながっている', 'c-green') : btn('これにつなぐ', (e, b) => doConnect(b, c.id), 'sm', 'link'))))
+        : h('p.small.muted', 'フォームが見つかりませんでした。下にURLを貼ってください')) : null,
+      h('details.small.mt8', h('summary', 'URLを貼ってつなぐ'),
+        h('p.muted', 'フォームの編集画面のURL（…/forms/d/〇〇/edit）か、回答のスプレッドシートのURLを貼ってください（回答用の forms.gle のURLは使えません）。'),
+        h('div.row', ref, btn('つなぐ', (e, b) => { if (!ref.value.trim()) return toast('URLを貼ってください', 'err'); doConnect(b, ref.value.trim()); }, 'sm', 'link'))));
+    if (forms.length) parts.push(...formCards);
+    parts.push(connectBox);
+    // 取り込みの状態
+    if (forms.length) {
+      const un = s.unmatched || [];
+      parts.push(h('div.panel',
+        h('h3', '取り込みの状態'),
+        !st.bridge ? h('div.msg.warn', '裏方GASの自動処理用アカウント（BRIDGE）が未設定か、サインインできません。新しい回答は自動では入りません（下の「今すぐそろえる」を押すと入ります）。セットアップ手順シートの「裏方アカウント」を確認してください。') : null,
+        h('div.kpis', kpiEl('回答の行', s.rows ?? '―'), kpiEl('記録に入った', s.events ?? '―', '件'), kpiEl('名簿と合わない名前', un.length, '人', un.length ? 'warn' : ''), kpiEl('わからない回答', (s.unparsed || []).length, '件')),
+        h('div.small.muted', `最後にそろえた：${s.lastSync ? fmtDate(s.lastSync) : 'まだ'}${s.mode === 'recent' ? '（1時間ごとの確認・最近3日分）' : s.mode === 'full' ? '（全部）' : ''}　／　フォームから最後に入った：${s.lastLive ? fmtDate(s.lastLive) : '―'}`),
+        s.failed ? h('div.msg.err', `書き込めなかったまとまりが ${s.failed} 個ありました。「今すぐそろえる」をもう一度押してください`) : null,
+        (s.unparsed || []).length ? h('div.small.mt8', '入室・退室がわからなかった答え（例）：', s.unparsed.map((x) => `「${x}」`).join(' '), h('span.muted', '　→ 上の「質問を選びなおす」で入室・退室の質問を選んでください')) : null,
+        s.stale ? h('div.msg.info.mt8', `シート（フォーム）側で消された・直された行が ${s.stale} 件、ポータルにだけ残っています。`, ' ', btn('ポータルからも消す', async (e, b) => { if (await ask(`ポータルにだけ残っている ${s.stale} 件の記録を消しますか？（シート・フォームはそのまま）`, { danger: true, ok: '消す' })) doSync(b, s.stale); }, 'xs', 'trash')) : null,
+        st.running && !busyMsg ? h('div.msg.info.mt8', 'いま、取り込みが動いています（1時間ごとの確認など）。少し待ってから「今すぐそろえる」を押してください') : null,
+        busyMsg ? h('div.msg.info.mt8', h('span.spinner.sm'), ' ', busyMsg) : null,
+        h('div.row.mt8', btn('今すぐそろえる（過去の分も）', (e, b) => doSync(b, false), 'primary', 'refresh'), h('span.small.muted', '新しい回答はふだん自動で入ります。名前の対応を決めたあとや、シートを直したあとに押してください'))));
+      // 名簿と合わない名前
+      if (un.length) {
+        const sels = new Map();
+        parts.push(h('div.panel',
+          h('h3', '名簿と合わない名前（会員を選ぶと、過去の分も入ります）'),
+          dataTable({ rows: un, cols: [
+            { k: 'name', label: 'フォームの名前' }, { k: 'count', label: '回数', cls: 'r' }, { k: 'last', label: '最後', render: (u) => fmtShort(new Date(u.last)) },
+            { k: 'sel', label: '会員', render: (u) => { const sel = h('select', h('option', { value: '' }, '（選ぶ）'), members.map((m) => h('option', { value: m.id }, m.name + (m.active === false ? '（止めている）' : ''))), h('option', { value: '__ignore' }, '（この名前は無視する）')); sels.set(u.key, [sel, u]); return sel; } }] }),
+          h('div.row.mt8', h('span.sp'), btn('保存してそろえる', (e, b) => {
+            const aliases = { ...(cfg.aliases || {}) }, labels = { ...(cfg.labels || {}) }, ignore = [...(cfg.ignore || [])];
+            let n = 0;
+            sels.forEach(([sel, u], key) => { if (!sel.value) return; n++; labels[key] = u.name; if (sel.value === '__ignore') { if (!ignore.includes(key)) ignore.push(key); delete aliases[key]; } else aliases[key] = sel.value; });
+            if (!n) return toast('会員を選んでください', 'err');
+            run(b, async () => { await saveCfg({ aliases, labels, ignore }); st = await call('sync', {}, true); toast('保存して、そろえました：' + syncText(st.sync), 'ok', 7000); }, '保存して、取り込みなおしています…');
+          }, 'primary', 'save'))));
+      }
+      // 決めた対応
+      const al = Object.entries(cfg.aliases || {}), ig = cfg.ignore || [];
+      if (al.length || ig.length) {
+        parts.push(h('details.panel', h('summary', h('b', `決めた名前の対応（${al.length + ig.length}）`)),
+          h('div.col.mt8', al.map(([k, uid]) => h('div.row', h('span.grow', `「${(cfg.labels || {})[k] || k}」→ ${memberName(uid)}`), btn('外す', (e, b) => {
+            const aliases = { ...(cfg.aliases || {}) }; delete aliases[k];
+            run(b, async () => { await saveCfg({ aliases }); st = await call('sync', {}, true); }, 'そろえなおしています…');
+          }, 'xs ghost', 'x'))),
+          ig.map((k) => h('div.row', h('span.grow.muted', `「${(cfg.labels || {})[k] || k}」→ 無視する`), btn('外す', (e, b) => {
+            run(b, async () => { await saveCfg({ ignore: ig.filter((x) => x !== k) }); st = await call('sync', {}, true); }, 'そろえなおしています…');
+          }, 'xs ghost', 'x'))))));
+      }
+    }
+    parts.push(h('p.small.muted', 'しくみ：フォームの回答 → 裏方GAS（団体のアカウント）→ ポータルの記録・在室ボード。1時間ごとに、最近3日分の取りこぼしも確かめます。同じ回答は何回取り込んでも1件です。'));
+    mount(box, ...parts);
+    if (busyMsg) box.querySelectorAll('button, select, input').forEach((x) => { x.disabled = true; });   // 取り込み中は二度押しできないように
+  }
+  ctx.track(DB.watchDoc('config/entryForm', (d) => { cfg = d || {}; draw(); }, () => {}));
+  mount(box, h('div.panel', loadingEl(), h('p.small.muted', { style: { textAlign: 'center' } }, '裏方GASに聞いています…')));
+  call('status').then((j) => { st = j; draw(); }).catch((e) => mount(box, h('div.panel', h('div.msg.err', errText(e)),
+    h('p.small.muted', '裏方GAS v2.2 以上が必要です（「設定・診断」の「診断」で版を確認できます）。'), btn('もう一度', () => entryFormTab(ctx, body), 'sm', 'refresh'))));
 }
 
 /* ---- 23_kiosk.js ---- */
@@ -4963,6 +5292,11 @@ function settingsDiag(ctx, body) {
     const line = (ok, text, detail) => out.appendChild(h('li', h('span', { class: ok === true ? 'ok-t' : ok === false ? 'ng-t' : 'muted' }, ok === true ? '✓ ' : ok === false ? '× ' : '・ '), text, detail ? h('span.small.muted', '　' + detail) : null));
     line(state.mode === 'live' ? true : null, 'サインインのしくみ（Firebase）', state.mode === 'live' ? `プロジェクト：${CONFIG.FIREBASE.projectId}` : 'デモ表示のため確認しません');
     line(true, `あなたの役割：${ROLES[role()]}`);
+    if (state.mode === 'live' && Mfa.needed(me())) {
+      const n = Mfa.factors().length;
+      line(n > 0, `あなたの2段階認証（認証アプリ）：${n ? `登録済み（${n}つ）` : '未登録'}`, n === 1 ? '予備も登録しておくと、スマホをなくしても入れます（右上のメニュー）' : n ? '' : '認証アプリの方式を有効にして、登録してください（手順シート 4-5）');
+    }
+    line(state.mode !== 'live' ? null : true, 'サインインの保存', state.mode !== 'live' ? 'デモ表示のため確認しません' : KIOSK_KEEP ? 'この端末に残す（キオスクの端末）' : 'このタブだけ（閉じたらサインアウト・端末に残さない）');
     for (const c of ['directory', 'config', 'tasks', 'presence', 'entries', 'equipment', 'usage', 'lending', 'maint', 'safety', 'reports', 'workorders', 'procedures', 'runs', 'items', 'stockMoves', 'stocktakes', 'sales', 'orders', 'docs', 'events', 'polls', 'requests', 'links', 'counters', 'shopConfig', 'shopProducts', 'shopOrders']) {
       try { await DB.list(c, { limit: 1, where: c === 'requests' && !isAdmin() ? [['requesterUid', '==', myUid()]] : [] }); line(true, `読み取り：${c}`); } catch (e) { line(false, `読み取り：${c}`, errText(e)); }
     }
@@ -4971,8 +5305,15 @@ function settingsDiag(ctx, body) {
     if (CONFIG.NOTIFY_URL && state.mode === 'live') {
       try {
         const r = await Notify.call('ping', {}, { timeout: 15000 });
-        const old = Number(r.version) < 2.1;
-        line(old ? false : true, `裏方GAS：v${r.version}`, (old ? '古い版です（v2.1 に更新してください。オンラインショップの注文を受け付けられません）／' : '') + (r.bridge ? '自動処理用アカウント：設定済み' : '自動処理用アカウント（BRIDGE）：未設定（機材メール・まとめメール・フォーム連携・ショップの注文は動きません）'));
+        const v = Number(r.version);
+        line(v < 2.1 ? false : true, `裏方GAS：v${r.version}`, (v < 2.1 ? '古い版です（v2.2 に更新してください。オンラインショップの注文を受け付けられません）／' : v < 2.2 ? 'v2.2 にすると、入退室のGoogleフォーム連携（過去の分の取り込み）が使えます／' : '') + (r.bridge ? '自動処理用アカウント：設定済み' : '自動処理用アカウント（BRIDGE）：未設定（機材メール・まとめメール・フォーム連携・ショップの注文は動きません）'));
+        if (v >= 2.2 && isAdmin()) {
+          try {
+            const ef = await Notify.call('entryForm', { op: 'status' }, { timeout: 30000 });
+            const un = ((ef.status || {}).unmatched || []).length;
+            line(ef.forms.length ? (un ? null : true) : null, '入退室のGoogleフォーム', ef.forms.length ? `${ef.forms.map((f) => f.title).join('、')}とつながっている${un ? `／名簿と合わない名前 ${un} 人（入退室 → Googleフォーム で会員を選ぶ）` : ''}` : 'つながっていない（使うなら：入退室 → Googleフォーム でつなぐ）');
+          } catch (e) { line(false, '入退室のGoogleフォーム', errText(e)); }
+        }
       } catch (e) { line(false, '裏方GAS', errText(e)); }
     } else line(null, '裏方GAS', CONFIG.NOTIFY_URL ? 'デモ表示のため確認しません' : 'NOTIFY_URL が未設定（メール通知・チャットのファイルが使えません）');
     try { await Codes.ready(); line(true, 'QRを作る部品（vendor/qrcode.js）'); } catch (e) { line(false, 'QRを作る部品（vendor/qrcode.js）', 'vendor フォルダをアップロードしてください'); }
@@ -5872,7 +6213,7 @@ defineApp('stock', {
     const tab = ctx.parts[0] || 'items';
     const body = ctx.head({
       tabs: [{ id: 'items', label: '在庫一覧', icon: 'boxes' }, { id: 'low', label: '発注・製造', icon: 'cart' }, { id: 'moves', label: '入出庫の記録', icon: 'history' }, { id: 'take', label: '棚卸', icon: 'listcheck' }, { id: 'archive', label: '取り扱い終了', icon: 'archive' }], tab,
-      actions: [btn('スキャン', () => stockScanDialog(), 'primary', 'scan'), tab === 'items' ? btn('品目を追加', () => itemForm(null), '', 'plus') : null]
+      actions: [btn('スキャン', () => stockScanDialog(), 'primary', 'scan'), tab === 'items' ? btn('カメラで読んで追加', () => stockScanAdd(), '', 'camera') : null, tab === 'items' ? btn('品目を追加', () => itemForm(null), '', 'plus') : null]
     });
     if (tab === 'items') stockItems(ctx, body);
     else if (tab === 'low') stockLow(ctx, body);
@@ -5926,8 +6267,10 @@ function itemForm(it, init = {}) {
     title: isNew ? '品目を追加（品番は自動）' : `品目を編集（${it.code}）`, size: 'lg',
     fields: [
       { k: 'kind', type: 'radio', label: '種類', opts: ITEM_KINDS, req: true, def: init.kind || '材料' },
-      { k: 'code', label: '品番', w: 2, ro: !isNew, ph: '空欄＝自動', help: isNew ? '空欄なら自動（例 P-003）。昔の品番を使うときだけ入れる' : '' },
-      { k: 'jan', label: 'JAN（買った商品のバーコード・任意）', w: 2, def: init.jan || '', inputmode: 'numeric' },
+      { k: 'code', label: '品番', w: 2, ro: !isNew, ph: '空欄＝自動', def: init.code || '', help: isNew ? '空欄なら自動（例 P-003）。昔の品番を使うときだけ入れる' : '' },
+      { k: 'jan', label: 'JAN（買った商品のバーコード・任意）', w: 2, def: init.jan || '', inputmode: 'numeric', ph: 'カメラのボタンで読めます',
+        scan: { title: '商品のバーコード（JAN）を読む', hint: '商品のバーコードを枠に入れてください', value: (t) => (/^\d{8,14}$/.test(t) ? t : ''), bad: 'JAN（数字8〜14けた）ではありません。商品のバーコードを読んでください',
+          after: async (code) => { const ex = await Stock.find(code).catch(() => null); if (ex && (!it || ex.code !== it.code)) toast(`このJANは「${ex.code} ${ex.name}」にもう登録されています`, 'err', 7000); } } },
       { k: 'abbr', label: '略号', w: 2, ph: 'PLA など' },
       { k: 'name', label: '品名', req: true, w: 4, max: 80, def: init.name || '' }, { k: 'spec', label: '仕様・規格・色', w: 2, max: 80 },
       { k: 'unit', label: '単位', w: 1, def: '個', list: ['個', '巻', '枚', '箱', '本', 'セット', 'kg', 'm'] },
@@ -5943,6 +6286,7 @@ function itemForm(it, init = {}) {
     values: it || {},
     onSubmit: async (v) => {
       if (v.jan && !Codes.isEan13(v.jan) && !/^\d{8}$/.test(v.jan)) { if (!await ask('JANのチェック数字が合いません（読み間違いかもしれません）。このまま保存しますか？', { ok: '保存する' })) return false; }
+      if (v.jan) { const ex = await Stock.find(v.jan).catch(() => null); if (ex && (!it || ex.code !== it.code) && !await ask(`このJANは「${ex.code} ${ex.name}」にもう登録されています。それでも保存しますか？（同じ商品なら、そちらに「入庫」してください）`, { ok: '保存する' })) return false; }
       const data = { kind: v.kind, jan: v.jan || '', abbr: v.abbr, name: v.name, spec: v.spec, unit: v.unit || '個', min: v.min, reorder: v.reorder || '', location: v.location, supplier: v.supplier, cost: v.cost, forSale: !!v.forSale, price: v.forSale ? v.price : null, note: v.note, updatedAt: DB.now() };
       if (isNew) {
         let code = (v.code || '').trim();
@@ -6020,6 +6364,27 @@ function inspectEditor() {
   const vals = INSPECT_ITEMS.map(() => '');
   const el = h('div.col', INSPECT_ITEMS.map((t, i) => h('div.row.nowrap', h('span.small.grow', t), h('div.seg', ['合', '否', '－'].map((x) => h('button', { type: 'button', onclick: (e) => { vals[i] = x; $$('button', e.target.parentNode).forEach((b) => b.classList.toggle('on', b === e.target)); } }, x))))));
   return { el, get: () => INSPECT_ITEMS.map((t, i) => ({ t, r: vals[i] })) };
+}
+
+/* ---------- カメラで読んで追加：登録ずみ → 入庫、まだ → JANを入れて品目の登録 ---------- */
+function stockScanAdd() {
+  Scanner.open({
+    title: 'カメラで読んで追加', formats: 'all', continuous: true, cooldown: 1500,
+    hint: '商品のバーコード（JAN）か、在庫のラベル（品番）を枠に入れてください',
+    intro: h('p.small.muted.mt0', '登録ずみの品目なら「入庫」、まだの品目なら、バーコードを入れた登録の画面を開きます。'),
+    onCode: async (text, p) => {
+      if (p.kind !== 'code' || !p.code) { beep(false); toast('在庫のバーコードではありません（IDカード・機材のQRは使えません）', 'err'); return true; }
+      const code = p.code.trim();
+      const it = await Stock.find(code).catch(() => null);
+      if (it && it.archived) { beep(false); toast(`「${it.code} ${it.name}」は取り扱い終了になっています（「取り扱い終了」タブで戻せます）`, 'err', 6000); return true; }
+      beep(true);
+      if (it) { setTimeout(() => moveForm(it, 'in'), 30); return false; }
+      const jan = /^\d{8,14}$/.test(code);
+      if (!jan && !/^[A-Za-z0-9\-_.]{2,24}$/.test(code)) { beep(false); toast('読み取れた文字が品番・JANの形ではありません。もう一度読んでください', 'err'); return true; }
+      setTimeout(() => { itemForm(null, jan ? { jan: code, kind: '商品' } : { code }); toast(jan ? `JAN ${code} を入れました。品名などを入れて保存してください` : `品番 ${code} を入れました`, '', 5000); }, 30);
+      return false;
+    }
+  });
 }
 
 /* ---------- スキャンで探す・入出庫 ---------- */
@@ -6987,6 +7352,14 @@ function shopPrivacyText(seller, email) {
 const Shop = {
   /** お客さま向けのページのURL（ポータルと同じ場所の shop/） */
   url() { try { return new URL('shop/', location.href.split('#')[0]).href; } catch { return 'shop/'; } },
+  /** お店のページを新しいタブで開く。サインインは「このタブだけ」なので、window.open で開いてタブの中身（サインイン）を写す
+      （同じサイトの自分たちのページなので、opener を残しても問題ない。ふつうのリンクで開くと、お客さまの見え方になる） */
+  openPage(e) {
+    if (e && (e.ctrlKey || e.metaKey || e.shiftKey || e.button)) return;   // 修飾キー付きは、ブラウザのふつうの動きにまかせる
+    if (e) e.preventDefault();
+    const w = window.open(Shop.url(), '_blank');
+    if (!w) location.href = Shop.url();
+  },
   flow(o) { return ['受付', '確認済み', '入金確認', o && o.needsAddress ? '発送済み' : '受け渡し済み', '完了']; },
   /** 公開用の在庫の数（実際の数は出さない：注文できる上限〔10以上〕まで） */
   publicStock(avail, p) {
@@ -7047,7 +7420,7 @@ defineApp('shop', {
     const st = h('span');
     const body = ctx.head({
       tabs: [{ id: 'orders', label: '注文', icon: 'inbox' }, { id: 'products', label: '載せる商品', icon: 'tag' }, isAdmin() ? { id: 'settings', label: 'お店の設定・表記', icon: 'settings' } : null], tab,
-      actions: [st, h('a.btn', { href: Shop.url(), target: '_blank', rel: 'noopener' }, icon('external'), 'お店のページ')]
+      actions: [st, h('a.btn', { href: Shop.url(), target: '_blank', onclick: Shop.openPage }, icon('external'), 'お店のページ')]
     });
     ctx.track(DB.watchDoc('shopConfig/main', (c) => mount(st, c && c.open === true ? stChip('公開中', 'c-green') : stChip('準備中', 'c-orange')), () => mount(st, stChip('準備中', 'c-orange'))));
     if (tab === 'products') shopProductsTab(ctx, body);
@@ -7485,7 +7858,7 @@ function shopSettingsForm(box, cur) {
   drawChan();
   mount(box,
     h('div.panel', h('h3', '公開の前に'), ready, h('div.mt8', chan),
-      h('p.small.muted', { style: { marginBottom: 0 } }, 'お店のページ：', h('a', { href: Shop.url(), target: '_blank', rel: 'noopener' }, Shop.url()), '（ポータルにサインインしたまま開くと、準備中でもプレビューとテスト注文ができます）')),
+      h('p.small.muted', { style: { marginBottom: 0 } }, 'お店のページ：', h('a', { href: Shop.url(), target: '_blank', onclick: Shop.openPage }, Shop.url()), '（ここのリンクか、上の「お店のページ」から開くと、準備中でもプレビューとテスト注文ができます）')),
     h('div.panel', f.el, msg, h('div.sticky-foot', btn('保存', async (e, b) => {
       const err = f.validate(); if (err) return msgBox(msg, err);
       const v = f.values();
@@ -7710,12 +8083,29 @@ async function onSignedIn(user) {
   try { member = await DB.get('members/' + user.uid); }
   catch (e) { screenPending('会員情報を読み込めませんでした：' + errText(e)); return; }
   if (!member || member.active !== true) { screenPending(); return; }
+  if (member.role === 'kiosk') {
+    // キオスク用アカウント：この端末をキオスク専用にして、再起動してもサインインしたままにする（2段階認証は使わない）
+    store.set('mtic-kiosk-device', '1'); store.sset('mtic-nokeep', null);
+    if (state.shared) { state.shared = false; store.sset('mtic-shared', null); }
+    fb.A.setPersistence(fb.auth, fb.A.indexedDBLocalPersistence).catch(() => {});
+  } else if (KIOSK_KEEP) {
+    // キオスクの端末で職員がサインインした：職員のデータが端末に残らない形（このタブだけ）で読み込みなおす
+    store.sset('mtic-nokeep', '1'); state.reloading = true; location.reload(); return;
+  }
   state.user = user;
   state.member = { ...member, id: user.uid, email: member.email || user.email };
-  if (isOwner()) DB.get('directory/' + user.uid).then((d) => { if (!d) return DB.set('directory/' + user.uid, { name: member.name || '', role: 'owner', active: true, memberNo: member.memberNo || '' }); }).catch(() => {});
-  onReady();
   const kind = store.sget('mtic-just');
-  if (kind) { markJust(null); Auth.afterSignIn(kind).catch(() => {}); }
+  if (kind) { markJust(null); Auth.afterSignIn(kind).catch(() => {}); }   // ログインの記録とお知らせ（2段階認証の登録前でも残す）
+  // 2段階認証（認証アプリ）：職員・管理者・責任者は、登録が済むまでポータルを使えない
+  if (Mfa.needed(state.member) && !Mfa.hasTotp() && !state.mfaSkip) {
+    screenMfaEnroll(user, () => { state.mfaSkip = true; toast('2段階認証なしで続けています（設定が済んだら登録してください）', '', 6000); ready(); });
+    return;
+  }
+  ready();
+  function ready() {
+    if (isOwner()) DB.get('directory/' + user.uid).then((d) => { if (!d) return DB.set('directory/' + user.uid, { name: member.name || '', role: 'owner', active: true, memberNo: member.memberNo || '' }); }).catch(() => {});
+    onReady();
+  }
 }
 async function startDemo() {
   state.mode = 'demo';
@@ -7748,7 +8138,8 @@ async function start() {
     if (state.reloading) return;
     if (user) { if (state.settingPw && !store.sget('mtic-just')) return; onSignedIn(user); }
     else {
-      state.user = null; state.member = null;
+      state.user = null; state.member = null; state.mfaSkip = false;
+      closeAllDialogs();
       state.unsub.forEach((u) => { try { u(); } catch { /* なし */ } }); state.unsub = [];
       Live.reset();
       if (!handled || !state.settingPw) screenSignin();

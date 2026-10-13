@@ -3,7 +3,7 @@
   ============================================================================
    M-TICオンラインショップ
    ファイル名 : shop/index.html
-   バージョン : v1.0（2026-10-12）
+   バージョン : v1.1（2026-10-13）
    置き場所   : ポータルと同じリポジトリの shop/ フォルダ（GitHub Pages）
    しくみ     : 商品と設定＝Firebase（だれでも見られる場所 shopProducts・shopConfig）
                 ／ 注文の受付＝裏方GAS（確認してから、職員だけが見られる shopOrders に入れる）
@@ -18,6 +18,7 @@
     ・公開／準備中の切り替え・商品の掲載・表記は、ポータルの「オンラインショップ」で行います
   ----------------------------------------------------------------------------
    変更履歴
+    v1.1 (2026-10-13) 職員のサインインは「このタブだけ」を見る（ポータルの「お店のページ」から開くと写される）
     v1.0 (2026-10-12) 初版：準備中表示・職員プレビュー・商品一覧・カート・注文（振込／受け取り時払い）
                     ・特定商取引法に基づく表記・プライバシーポリシー
   ============================================================================
@@ -266,7 +267,7 @@ dialog.dlg::backdrop{background:rgba(10,16,30,.5)}
    ・注文は裏方GASへ送る（GASが中身・在庫・金額を確かめてから shopOrders に入れ、確認メールを送る）
    ・準備中のあいだは「準備中」だけを表示。ポータルにサインイン中の職員はプレビューとテスト注文ができる
    ========================================================================== */
-const SHOP_VERSION = '1.0';
+const SHOP_VERSION = '1.1';
 const EXT = window.MTIC_CONFIG || {};
 const FIREBASE = EXT.FIREBASE || {};
 const NOTIFY_URL = EXT.NOTIFY_URL || '';
@@ -415,9 +416,9 @@ async function loadData() {
 async function watchStaff() {
   const A = await import(SDK + 'firebase-auth.js');
   const { app, F, db } = S.fb;
-  // ポータルと同じ保存場所だけを見る（共用端末モードのサインインを、この端末に残る形に移さないため）
-  const shared = store.sget('mtic-shared') === '1';
-  const auth = A.initializeAuth(app, { persistence: shared ? [A.browserSessionPersistence] : [A.indexedDBLocalPersistence, A.browserLocalPersistence] });
+  // ポータル（v2.2〜）と同じく「このタブだけ」のサインインを見る。ポータルの「お店のページ」から開くと、そのタブのサインインが写される
+  // （端末に残る形には移さない。お店のページでサインインはしない）
+  const auth = A.initializeAuth(app, { persistence: [A.browserSessionPersistence] });
   A.onAuthStateChanged(auth, async (user) => {
     let staff = null;
     if (user) {
